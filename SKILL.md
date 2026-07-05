@@ -1,9 +1,9 @@
 ---
-name: douyin-sensitive-check
-description: 抖音/短视频违禁词和敏感词检测（本地词库版，无需 API Key），支持文案文本检测，也支持视频逐秒截图 OCR 后逐秒检测画面文字。每天首次使用自动从 GitHub 开源词库更新本地缓存，离线检测文案合规性。支持多词库合并（广告极限词、平台限流词、暴恐、色情、涉枪涉爆等）。使用场景：(1) 生成短视频文案后自动检测违禁词，(2) 用户要求检查某段文字是否有问题，(3) 抖音/快手/B站内容合规审核，(4) 直播话术自查，(5) 用户给视频文件要求每秒截图、OCR 画面文字并验证是否含违禁词。触发词：违禁词、敏感词、检测、合规、抖音风控、限流词、能不能发、视频违禁词、逐秒截图、OCR 检查。
+name: content-safety-checker
+description: 本地内容合规和违禁词检测（本地词库版，无需 API Key），支持文案文本检测、文本文件检测，也支持视频截图 OCR 后检测画面文字。每天首次使用自动从 GitHub 开源词库更新本地缓存，离线检测文案合规性。支持多词库合并（广告极限词、平台限流词、暴恐、色情、涉枪涉爆等）。使用场景：(1) 生成短视频文案后自动检测违禁词，(2) 用户要求检查某段文字是否有问题，(3) 内容平台发布前合规审核，(4) 直播话术自查，(5) 用户给视频文件要求截图、OCR 画面文字并验证是否含违禁词。触发词：违禁词、敏感词、检测、合规、限流词、能不能发、视频违禁词、逐秒截图、OCR 检查。
 ---
 
-# 抖音违禁词检测 Skill（开源词库版）
+# Content Safety Checker Skill（开源词库版）
 
 本地词库 + 每日自动更新，无需 API Key，离线可用。
 
@@ -11,8 +11,8 @@ description: 抖音/短视频违禁词和敏感词检测（本地词库版，无
 
 ```
 scripts/
-  check.py          # 文案检测脚本（入口）
-  check_video.py    # 视频逐秒截图 + OCR + 逐秒检测脚本
+  check.py          # 统一入口：自动判断文本、文本文件或视频文件
+  check_video.py    # 视频截图 + OCR + 检测脚本（兼容入口）
   update_words.py   # 词库更新模块（每天首次自动触发）
 data/              # 运行时生成，词库缓存目录（.gitignore 排除缓存文件）
   .gitkeep
@@ -24,7 +24,7 @@ data/              # 运行时生成，词库缓存目录（.gitignore 排除缓
 ## 常用命令
 
 ```bash
-SKILL=~/.codex/skills/douyin-sensitive-check
+SKILL=~/.codex/skills/content-safety-checker
 
 # 检测一段文案
 python3 $SKILL/scripts/check.py "今天给大家推荐史上最好用的护肤品，加我微信领优惠券"
@@ -41,9 +41,9 @@ python3 $SKILL/scripts/check.py --update
 # 查看词库状态
 python3 $SKILL/scripts/check.py --status
 
-# 视频逐秒截图 + OCR + 违禁词检测
+# 视频截图 + OCR + 违禁词检测
 # 依赖: ffmpeg, ffprobe, tesseract。首次缺少中文 OCR 包时自动下载到 data/tessdata/
-python3 $SKILL/scripts/check_video.py /path/to/video.mp4 -o /path/to/output_dir
+python3 $SKILL/scripts/check.py /path/to/video.mp4 -o /path/to/output_dir
 ```
 
 ## 工作流
@@ -58,10 +58,10 @@ python3 $SKILL/scripts/check_video.py /path/to/video.mp4 -o /path/to/output_dir
 
 ### 视频逐秒截图检测
 
-当用户给视频并要求检查画面里的违禁词时，直接运行：
+当用户给视频并要求检查画面里的违禁词时，直接运行统一入口：
 
 ```bash
-python3 $SKILL/scripts/check_video.py /path/to/video.mp4 -o /path/to/output_dir
+python3 $SKILL/scripts/check.py /path/to/video.mp4 -o /path/to/output_dir
 ```
 
 脚本流程：
@@ -93,7 +93,7 @@ python3 $SKILL/scripts/check_video.py /path/to/video.mp4 -o /path/to/output_dir
 
 ## 重要提示
 
-- 开源词库以通用违禁词为主，抖音平台的部分特有限流词（如"私信"、"加微信"）已内置在 `check.py` 的 `CATEGORY_PATTERNS` 中补充
+- 开源词库以通用违禁词为主，部分内容平台常见限流词（如"私信"、"加微信"）已内置在 `check.py` 的 `BUILTIN_RISK_WORDS` 中补充
 - 匹配策略是子串匹配，可能有误报；如需精确匹配可编辑 `data/sensitive_words.txt` 删除误报词
 - 视频检测依赖 OCR，低对比度、小字号、动态模糊、遮挡字幕会影响识别；重要结果要抽查对应秒数截图
 - 改写建议：被标注词优先用谐音、符号分割、同义替换等方式规避

@@ -1,108 +1,160 @@
 #!/usr/bin/env python3
 """
-抖音/短视频违禁词检测脚本（本地词库版）
+Local content safety checker.
 
-用法:
-  python3 check.py "你的文案内容"
-  python3 check.py -f input.txt
-  echo "文案" | python3 check.py
-  python3 check.py --update          # 强制更新词库
-  python3 check.py --status          # 查看词库状态
-
-工作流:
-  1. 每天首次运行自动更新词库（从多个 GitHub 开源词库拉取）
-  2. 对输入文案做全词匹配（含子串匹配）
-  3. 输出命中词及上下文位置，给出替换建议
+The command accepts inline text, text files, or video files. Video input is
+automatically routed to the OCR workflow in check_video.py.
 """
 
-import sys
+from __future__ import annotations
+
+import argparse
+import csv
+import json
 import re
+import subprocess
+import sys
+from datetime import datetime
 from pathlib import Path
 
-# 添加 scripts 目录到路径
 sys.path.insert(0, str(Path(__file__).parent))
-from update_words import update_words, load_words, status, needs_update
+from update_words import load_words, needs_update, status, update_words  # noqa: E402
 
 
-# 按类别匹配关键词（用于显示风险等级）
-# 这些词不在通用违禁词库，但抖音/短视频平台已知会限流或违规
+SCRIPT_DIR = Path(__file__).resolve().parent
+VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm", ".flv"}
+TEXT_EXTS = {".txt", ".md", ".srt", ".ass", ".csv", ".json", ".log"}
+
 BUILTIN_RISK_WORDS = {
     "广告极限词（广告法）": [
-        "史上最", "最好", "第一", "唯一", "顶级", "极致", "无敌", "全网最",
-        "最强", "最优", "最大", "最低", "最高", "最便宜", "最实惠", "最划算",
-        "专家级", "国家级", "行业第一", "销量第一", "NO.1", "no.1",
-        "绝对", "100%", "永久", "终身", "彻底", "根治",
+        "史上最",
+        "最好",
+        "第一",
+        "唯一",
+        "顶级",
+        "极致",
+        "无敌",
+        "全网最",
+        "最强",
+        "最优",
+        "最大",
+        "最低",
+        "最高",
+        "最便宜",
+        "最实惠",
+        "最划算",
+        "专家级",
+        "国家级",
+        "行业第一",
+        "销量第一",
+        "NO.1",
+        "no.1",
+        "绝对",
+        "100%",
+        "永久",
+        "终身",
+        "彻底",
+        "根治",
     ],
-    "平台限流词（抖音）": [
-        "推广", "广告", "营销", "引流", "涨粉", "买粉", "刷量",
-        "私信", "加微信", "加我微信", "微信号", "扫码", "二维码",
-        "点链接", "点击链接", "下单", "购买", "下载", "安装",
-        "优惠券", "领券", "领红包", "福利", "免费领",
-        "秒杀", "限时", "限量", "抢购", "团购",
-        "代理", "招商", "加盟", "合作", "分销",
+    "平台限流词（内容平台）": [
+        "推广",
+        "广告",
+        "营销",
+        "引流",
+        "涨粉",
+        "买粉",
+        "刷量",
+        "私信",
+        "加微信",
+        "加我微信",
+        "微信号",
+        "扫码",
+        "二维码",
+        "点链接",
+        "点击链接",
+        "下单",
+        "购买",
+        "下载",
+        "安装",
+        "优惠券",
+        "领券",
+        "领红包",
+        "福利",
+        "免费领",
+        "秒杀",
+        "限时",
+        "限量",
+        "抢购",
+        "团购",
+        "代理",
+        "招商",
+        "加盟",
+        "合作",
+        "分销",
     ],
     "医疗健康违禁词": [
-        "包治", "根治", "治愈", "特效", "祖传秘方", "偏方",
-        "无副作用", "无任何副作用", "药到病除", "立竿见影",
+        "包治",
+        "根治",
+        "治愈",
+        "特效",
+        "祖传秘方",
+        "偏方",
+        "无副作用",
+        "无任何副作用",
+        "药到病除",
+        "立竿见影",
     ],
 }
 
 
 def categorize_word(word: str) -> str:
-    """对命中词做简单分类，没有精确分类就返回通用"""
-    for cat, keywords in BUILTIN_RISK_WORDS.items():
-        if word in keywords or any(k in word for k in keywords):
-            return cat
+    for category, keywords in BUILTIN_RISK_WORDS.items():
+        if word in keywords or any(keyword in word for keyword in keywords):
+            return category
     return "违禁/敏感词"
 
-def find_hits(text: str, words: set) -> list[dict]:
-    """
-    在文案中查找所有命中的词，返回列表。
-    同时检测词库词 + 内置平台限流词。
-    每条包含: word, positions, category, source
-    """
-    # 合并词库词 + 内置词
-    all_check: list[tuple[str, str]] = []  # (word, source)
+
+def find_hits(text: str, words: set[str]) -> list[dict]:
+    all_check: list[tuple[str, str]] = []
     for word in words:
         all_check.append((word, "词库"))
-    for cat, cat_words in BUILTIN_RISK_WORDS.items():
-        for word in cat_words:
-            all_check.append((word, cat))
+    for category, category_words in BUILTIN_RISK_WORDS.items():
+        for word in category_words:
+            all_check.append((word, category))
 
-    # 按词长从长到短排序，优先匹配长词
-    all_check.sort(key=lambda x: len(x[0]), reverse=True)
+    all_check.sort(key=lambda item: len(item[0]), reverse=True)
 
     hits = []
     found_words = set()
-
     for word, source in all_check:
-        if word in found_words:
+        dedupe_key = word.casefold()
+        if dedupe_key in found_words:
             continue
-        positions = [m.span() for m in re.finditer(re.escape(word), text, re.IGNORECASE)]
+        positions = [match.span() for match in re.finditer(re.escape(word), text, re.IGNORECASE)]
         if positions:
-            cat = source if source != "词库" else categorize_word(word)
-            hits.append({
-                "word": word,
-                "positions": positions,
-                "category": cat,
-                "source": source,
-                "count": len(positions),
-            })
-            found_words.add(word)
+            category = source if source != "词库" else categorize_word(word)
+            hits.append(
+                {
+                    "word": word,
+                    "positions": positions,
+                    "category": category,
+                    "source": source,
+                    "count": len(positions),
+                }
+            )
+            found_words.add(dedupe_key)
 
-    # 按出现位置排序
-    hits.sort(key=lambda h: h["positions"][0][0])
+    hits.sort(key=lambda hit: hit["positions"][0][0])
     return hits
 
+
 def highlight_text(text: str, hits: list[dict]) -> str:
-    """在命中位置插入标记（用于终端显示）"""
     if not hits:
         return text
-    # 收集所有命中区间
+
     spans = []
-    for h in hits:
-        for start, end in h["positions"]:
-            spans.append((start, end))
+    for hit in hits:
+        spans.extend(hit["positions"])
     spans.sort()
 
     result = []
@@ -114,117 +166,230 @@ def highlight_text(text: str, hits: list[dict]) -> str:
     result.append(text[prev:])
     return "".join(result)
 
+
 def get_context(text: str, start: int, end: int, window: int = 10) -> str:
-    """截取命中词的上下文"""
     ctx_start = max(0, start - window)
     ctx_end = min(len(text), end + window)
-    prefix = "…" if ctx_start > 0 else ""
-    suffix = "…" if ctx_end < len(text) else ""
+    prefix = "..." if ctx_start > 0 else ""
+    suffix = "..." if ctx_end < len(text) else ""
     return f"{prefix}{text[ctx_start:start]}【{text[start:end]}】{text[end:ctx_end]}{suffix}"
+
 
 def format_result(text: str, hits: list[dict]) -> str:
     lines = []
 
     if not hits:
-        lines.append("✅ 检测通过 — 未发现违禁词/敏感词")
-        lines.append(f"📊 检测字数: {len(text)} 字")
+        lines.append("检测通过：未发现违禁词/敏感词")
+        lines.append(f"检测字数: {len(text)} 字")
         return "\n".join(lines)
 
-    # 分类
-    forbidden = [h for h in hits if h["source"] == "词库"]
-    platform  = [h for h in hits if "平台限流词" in h["category"]]
-    adwords   = [h for h in hits if "广告极限词" in h["category"]]
-    medical   = [h for h in hits if "医疗" in h["category"]]
+    forbidden = [hit for hit in hits if hit["source"] == "词库"]
+    platform = [hit for hit in hits if "平台限流词" in hit["category"]]
+    adwords = [hit for hit in hits if "广告极限词" in hit["category"]]
+    medical = [hit for hit in hits if "医疗" in hit["category"]]
 
-    lines.append(f"🚨 发现 {len(hits)} 个风险词，建议修改后再发布\n")
+    lines.append(f"发现 {len(hits)} 个风险词，建议修改后再发布\n")
 
     if forbidden:
-        lines.append("🔴 违禁词（高风险，必改）:")
-        for h in forbidden:
-            ctx = get_context(text, *h["positions"][0])
-            times = f"（出现{h['count']}次）" if h["count"] > 1 else ""
-            lines.append(f"   ▸ {h['word']}{times}  [{h['category']}]")
+        lines.append("违禁词（高风险，必改）:")
+        for hit in forbidden:
+            ctx = get_context(text, *hit["positions"][0])
+            times = f"（出现{hit['count']}次）" if hit["count"] > 1 else ""
+            lines.append(f"   - {hit['word']}{times}  [{hit['category']}]")
             lines.append(f"     上下文: {ctx}")
 
     if platform:
-        lines.append("\n🟠 平台限流词（建议替换，影响流量）:")
-        for h in platform:
-            ctx = get_context(text, *h["positions"][0])
-            times = f"（出现{h['count']}次）" if h["count"] > 1 else ""
-            lines.append(f"   ▸ {h['word']}{times}")
+        lines.append("\n平台限流词（建议替换，影响流量）:")
+        for hit in platform:
+            ctx = get_context(text, *hit["positions"][0])
+            times = f"（出现{hit['count']}次）" if hit["count"] > 1 else ""
+            lines.append(f"   - {hit['word']}{times}")
             lines.append(f"     上下文: {ctx}")
 
     if adwords:
-        lines.append("\n🟡 广告极限词（广告法风险）:")
-        for h in adwords:
-            ctx = get_context(text, *h["positions"][0])
-            times = f"（出现{h['count']}次）" if h["count"] > 1 else ""
-            lines.append(f"   ▸ {h['word']}{times}")
+        lines.append("\n广告极限词（广告法风险）:")
+        for hit in adwords:
+            ctx = get_context(text, *hit["positions"][0])
+            times = f"（出现{hit['count']}次）" if hit["count"] > 1 else ""
+            lines.append(f"   - {hit['word']}{times}")
             lines.append(f"     上下文: {ctx}")
 
     if medical:
-        lines.append("\n🟡 医疗违禁词（广告法）:")
-        for h in medical:
-            ctx = get_context(text, *h["positions"][0])
-            lines.append(f"   ▸ {h['word']}  上下文: {ctx}")
+        lines.append("\n医疗违禁词（广告法）:")
+        for hit in medical:
+            ctx = get_context(text, *hit["positions"][0])
+            lines.append(f"   - {hit['word']}  上下文: {ctx}")
 
-    lines.append("\n── 标注后文案 ──")
+    lines.append("\n-- 标注后文本 --")
     lines.append(highlight_text(text, hits))
-    lines.append(f"\n📊 检测字数: {len(text)} 字 | 风险词: {len(hits)} 个")
+    lines.append(f"\n检测字数: {len(text)} 字 | 风险词: {len(hits)} 个")
     return "\n".join(lines)
 
 
-def main():
-    # 处理特殊参数
-    if "--status" in sys.argv:
-        s = status()
-        print(f"词库状态:")
-        print(f"  最后更新: {s['last_update']}")
-        print(f"  词条数量: {s['word_count']:,}")
-        print(f"  词库文件: {s['words_file']}")
-        print(f"  今日需更新: {'是' if s['needs_update'] else '否'}")
-        return
+def write_text_outputs(text: str, hits: list[dict], input_label: str, output_dir: Path) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    generated = datetime.now().isoformat(timespec="seconds")
 
-    if "--update" in sys.argv:
-        from update_words import update_words as _update_words
-        _update_words(force=True)
-        return
+    rows = []
+    for hit in hits:
+        for start, end in hit["positions"]:
+            rows.append(
+                {
+                    "word": hit["word"],
+                    "category": hit["category"],
+                    "source": hit["source"],
+                    "start": start,
+                    "end": end,
+                    "context": get_context(text, start, end),
+                }
+            )
 
-    # 读取输入文案
-    if len(sys.argv) >= 3 and sys.argv[1] == "-f":
-        with open(sys.argv[2], "r", encoding="utf-8") as f:
-            content = f.read()
-    elif len(sys.argv) >= 2 and not sys.argv[1].startswith("--"):
-        content = " ".join(sys.argv[1:])
-    elif not sys.stdin.isatty():
-        content = sys.stdin.read()
-    else:
-        print("用法: python3 check.py \"文案内容\"")
-        print("      python3 check.py -f input.txt")
-        print("      python3 check.py --update    # 强制更新词库")
-        print("      python3 check.py --status    # 查看词库状态")
-        sys.exit(1)
+    with (output_dir / "hits.csv").open("w", encoding="utf-8", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=["word", "category", "source", "start", "end", "context"])
+        writer.writeheader()
+        writer.writerows(rows)
 
-    content = content.strip()
-    if not content:
-        print("❌ 内容为空")
-        sys.exit(1)
+    report = {
+        "generated_at": generated,
+        "input": input_label,
+        "finding_count": len(rows),
+        "unique_words": sorted({row["word"] for row in rows}),
+        "outputs": {
+            "report_md": str(output_dir / "report.md"),
+            "hits_csv": str(output_dir / "hits.csv"),
+            "report_json": str(output_dir / "report.json"),
+        },
+    }
+    (output_dir / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    (output_dir / "report.md").write_text(format_result(text, hits) + "\n", encoding="utf-8")
 
-    # 每天第一次自动更新词库
-    if needs_update():
+
+def print_status() -> None:
+    current = status()
+    print("词库状态:")
+    print(f"  最后更新: {current['last_update']}")
+    print(f"  词条数量: {current['word_count']:,}")
+    print(f"  词库文件: {current['words_file']}")
+    print(f"  今日需更新: {'是' if current['needs_update'] else '否'}")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Local forbidden-word checker for text, files, and videos.")
+    parser.add_argument("input", nargs="?", help="Inline text or a text/video file path.")
+    parser.add_argument("--text", help="Inline text to scan.")
+    parser.add_argument("-f", "--file", type=Path, help="Text file to scan.")
+    parser.add_argument("--video", type=Path, help="Video file to scan with OCR.")
+    parser.add_argument("-o", "--output-dir", type=Path, help="Output directory for reports.")
+    parser.add_argument("--sample-every", type=float, default=1.0, help="Seconds between video screenshots.")
+    parser.add_argument("--tessdata-dir", type=Path, help="Tesseract language data directory for video OCR.")
+    parser.add_argument("--no-download-tessdata", action="store_true", help="Do not download missing OCR language data.")
+    parser.add_argument("--psm", type=int, default=11, help="Tesseract page segmentation mode for video OCR.")
+    parser.add_argument("--update", action="store_true", help="Force lexicon update before scanning.")
+    parser.add_argument("--status", action="store_true", help="Show local lexicon status.")
+    parser.add_argument("--fail-on-hit", action="store_true", help="Exit with code 2 when findings are present.")
+    return parser.parse_args()
+
+
+def infer_input(args: argparse.Namespace) -> tuple[str, str, Path | None]:
+    explicit = [bool(args.text), bool(args.file), bool(args.video)]
+    if sum(explicit) > 1:
+        raise SystemExit("Use only one of --text, --file, or --video.")
+
+    if args.video:
+        return "video", str(args.video), args.video.expanduser()
+    if args.file:
+        return "file", str(args.file), args.file.expanduser()
+    if args.text:
+        return "text", args.text, None
+    if args.input:
+        possible_path = Path(args.input).expanduser()
+        if possible_path.exists():
+            suffix = possible_path.suffix.lower()
+            if suffix in VIDEO_EXTS:
+                return "video", str(possible_path), possible_path
+            if suffix in TEXT_EXTS or possible_path.is_file():
+                return "file", str(possible_path), possible_path
+        return "text", args.input, None
+    if not sys.stdin.isatty():
+        return "text", sys.stdin.read(), None
+    raise SystemExit("Provide text, a text file, a video file, or stdin.")
+
+
+def run_video_scan(args: argparse.Namespace, video: Path) -> int:
+    if not video.exists():
+        print(f"视频不存在: {video}", file=sys.stderr)
+        return 1
+
+    cmd = [sys.executable, str(SCRIPT_DIR / "check_video.py"), str(video)]
+    if args.output_dir:
+        cmd.extend(["-o", str(args.output_dir)])
+    if args.tessdata_dir:
+        cmd.extend(["--tessdata-dir", str(args.tessdata_dir)])
+    if args.no_download_tessdata:
+        cmd.append("--no-download-tessdata")
+    if args.psm:
+        cmd.extend(["--psm", str(args.psm)])
+    if args.update:
+        cmd.append("--update")
+    if args.sample_every != 1.0:
+        cmd.extend(["--sample-every", str(args.sample_every)])
+
+    completed = subprocess.run(cmd)
+    return completed.returncode
+
+
+def run_text_scan(args: argparse.Namespace, input_kind: str, input_label: str, path: Path | None) -> int:
+    if args.update:
+        update_words(force=True)
+    elif needs_update():
         update_words()
         print()
 
-    # 加载词库
     words = load_words()
     if not words:
-        print("⚠️  词库为空，请先运行: python3 check.py --update")
-        sys.exit(1)
+        print("提示：本地词库为空，仅使用内置风险词。可运行 --update 拉取开源词库。", file=sys.stderr)
 
-    # 检测
+    if input_kind == "file":
+        assert path is not None
+        if not path.exists():
+            print(f"文件不存在: {path}", file=sys.stderr)
+            return 1
+        content = path.read_text(encoding="utf-8", errors="ignore").strip()
+        display_label = str(path)
+    else:
+        content = input_label.strip()
+        display_label = "<inline text>"
+
+    if not content:
+        print("内容为空", file=sys.stderr)
+        return 1
+
     hits = find_hits(content, words)
     print(format_result(content, hits))
+    if args.output_dir:
+        write_text_outputs(content, hits, display_label, args.output_dir)
+        print(f"\n报告已写入: {args.output_dir / 'report.md'}")
+
+    return 2 if args.fail_on_hit and hits else 0
+
+
+def main() -> int:
+    args = parse_args()
+    if args.status:
+        print_status()
+        return 0
+    if args.update and not any([args.input, args.text, args.file, args.video]) and sys.stdin.isatty():
+        update_words(force=True)
+        return 0
+    if args.sample_every <= 0:
+        raise SystemExit("--sample-every must be greater than 0.")
+
+    input_kind, input_label, path = infer_input(args)
+    if input_kind == "video":
+        assert path is not None
+        return run_video_scan(args, path)
+    return run_text_scan(args, input_kind, input_label, path)
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -1,15 +1,16 @@
-# douyin-sensitive-check
+# content-safety-checker
 
-> 抖音/短视频违禁词检测 Skill — 本地运行、无需 API Key，支持文本检测和视频逐秒截图 OCR 检测。
+> 本地内容合规检测 Skill。无需 API Key，支持文本检测、文本文件检测，以及视频抽帧 OCR 后检测画面文字。
 
 ## 功能
 
 - 🔴 **违禁词检测**：涵盖政治、暴恐、色情、涉枪涉爆等（3,000+ 词）
-- 🟠 **平台限流词**：抖音已知限流词，如"推广"、"加微信"、"优惠券"等
+- 🟠 **平台限流词**：常见内容平台风险词，如"推广"、"加微信"、"优惠券"等
 - 🟡 **广告极限词**：广告法违禁极限词，如"最好"、"第一"、"史上最"等
 - 🟡 **医疗违禁词**：如"包治"、"根治"、"无副作用"等
 - 📍 **上下文标注**：精确定位词在文案中的位置
-- 🎬 **视频 OCR 检测**：逐秒截图，用 Tesseract OCR 识别画面文字后检测
+- 🎬 **视频 OCR 检测**：按秒或自定义间隔截图，用 Tesseract OCR 识别画面文字后检测
+- 🧭 **自动分流**：同一个 `check.py` 入口会根据用户输入自动判断文本、文本文件或视频文件
 - 🔄 **每日自动更新**：每天首次使用自动从 GitHub 拉取最新词库
 
 ## 依赖
@@ -31,10 +32,10 @@
 
 ```bash
 # 克隆到本机全局 skills 目录
-git clone https://github.com/codeAnqiang-ma/douyin-sensitive-check ~/.codex/skills/douyin-sensitive-check
+git clone https://github.com/codeAnqiang-ma/content-safety-checker ~/.codex/skills/content-safety-checker
 
 # 可选：暴露给其他本地 agent
-ln -sfn ~/.codex/skills/douyin-sensitive-check ~/.agents/skills/douyin-sensitive-check
+ln -sfn ~/.codex/skills/content-safety-checker ~/.agents/skills/content-safety-checker
 ```
 
 ## 使用
@@ -46,7 +47,7 @@ ln -sfn ~/.codex/skills/douyin-sensitive-check ~/.agents/skills/douyin-sensitive
 ### 命令行直接使用
 
 ```bash
-SKILL=~/.codex/skills/douyin-sensitive-check
+SKILL=~/.codex/skills/content-safety-checker
 
 # 检测文案
 python3 $SKILL/scripts/check.py "你的文案内容"
@@ -60,7 +61,10 @@ python3 $SKILL/scripts/check.py --update
 # 查看词库状态
 python3 $SKILL/scripts/check.py --status
 
-# 视频逐秒截图 + OCR + 违禁词检测
+# 视频 OCR + 违禁词检测，统一入口会自动识别视频路径
+python3 $SKILL/scripts/check.py /path/to/video.mp4 -o /path/to/output_dir
+
+# 兼容入口仍可直接使用
 python3 $SKILL/scripts/check_video.py /path/to/video.mp4 -o /path/to/output_dir
 ```
 

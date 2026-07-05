@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Video screenshot sensitive-word checker.
+Video OCR forbidden-word checker.
 
 Workflow:
   1. Extract one screenshot per second from a video.
   2. OCR each screenshot with Tesseract.
-  3. Run the existing douyin-sensitive-check word matcher on each OCR result.
+  3. Run the shared word matcher on each OCR result.
   4. Write a review summary, complete report, CSV hits, OCR JSONL, and frames.
 """
 
@@ -65,16 +65,19 @@ def video_duration_seconds(video: Path) -> float:
 
 def default_output_dir(video: Path) -> Path:
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return Path.cwd() / f"{video.stem}_sensitive_check_{stamp}"
+    return Path.cwd() / f"{video.stem}_content_check_{stamp}"
 
 
-def extract_second_frames(video: Path, frames_dir: Path) -> int:
+def extract_second_frames(video: Path, frames_dir: Path, sample_every: float) -> int:
     duration = video_duration_seconds(video)
-    last_second = int(math.floor(duration))
+    frame_count = max(1, int(math.ceil(duration / sample_every)))
     frames_dir.mkdir(parents=True, exist_ok=True)
 
-    for second in range(last_second + 1):
-        out = frames_dir / f"sec_{second:03d}.png"
+    created = 0
+    for index in range(frame_count):
+        second = round(index * sample_every, 3)
+        safe_second = str(second).replace(".", "_")
+        out = frames_dir / f"sec_{index:03d}_{safe_second}s.png"
         cmd = [
             "ffmpeg",
             "-hide_banner",
@@ -89,8 +92,10 @@ def extract_second_frames(video: Path, frames_dir: Path) -> int:
             str(out),
         ]
         subprocess.run(cmd, check=True)
+        if out.exists() and out.stat().st_size > 0:
+            created += 1
 
-    return last_second + 1
+    return created
 
 
 def tesseract_langs() -> tuple[set[str], Path | None]:
@@ -173,15 +178,17 @@ def ocr_frame(frame: Path, tessdata_dir: Path, language: str, psm: int) -> str:
 
 
 def write_ocr_jsonl(frames_dir: Path, ocr_path: Path, tessdata_dir: Path, language: str, psm: int) -> list[dict]:
-    sec_re = re.compile(r"sec_(\d+)\.png$")
+    sec_re = re.compile(r"sec_(\d+)(?:_([0-9_]+)s)?\.png$")
     results = []
 
     with ocr_path.open("w", encoding="utf-8") as f:
         for frame in sorted(frames_dir.glob("sec_*.png")):
             match = sec_re.search(frame.name)
             second = int(match.group(1)) if match else -1
+            timestamp = float(match.group(2).replace("_", ".")) if match and match.group(2) else float(second)
             item = {
                 "second": second,
+                "timestamp": timestamp,
                 "frame": str(frame.resolve()),
                 "text": ocr_frame(frame, tessdata_dir, language, psm),
             }
@@ -214,6 +221,7 @@ def flatten_hit_rows(results: list[dict]) -> list[dict]:
                 rows.append(
                     {
                         "second": item["second"],
+                        "timestamp": item.get("timestamp", item["second"]),
                         "word": hit["word"],
                         "category": hit["category"],
                         "source": hit["source"],
@@ -230,7 +238,7 @@ def write_hits_csv(rows: list[dict], csv_path: Path) -> None:
     with csv_path.open("w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(
             f,
-            fieldnames=["second", "word", "category", "source", "start", "end", "ocr_text", "frame"],
+            fieldnames=["second", "timestamp", "word", "category", "source", "start", "end", "ocr_text", "frame"],
         )
         writer.writeheader()
         writer.writerows(rows)
@@ -241,7 +249,7 @@ def is_low_confidence_short_ascii(word: str) -> bool:
 
 
 def seconds_for(rows: list[dict]) -> str:
-    return ", ".join(str(second) for second in sorted({int(row["second"]) for row in rows}))
+    return ", ".join(str(second) for second in sorted({row.get("timestamp", row["second"]) for row in rows}))
 
 
 def write_review_summary(video: Path, results: list[dict], rows: list[dict], summary_path: Path) -> None:
@@ -262,7 +270,7 @@ def write_review_summary(video: Path, results: list[dict], rows: list[dict], sum
     hit_frames = len([item for item in results if item["hits"]])
 
     lines = [
-        f"# {video.name} 逐秒截图违禁词复核摘要",
+        f"# {video.name} 视频 OCR 违禁词复核摘要",
         "",
         f"- 视频：`{video}`",
         f"- 抽帧：共 {checked} 张截图",
@@ -304,7 +312,7 @@ def write_review_summary(video: Path, results: list[dict], rows: list[dict], sum
             "",
             "## 文件",
             "",
-            "- 完整逐秒 OCR 与原始命中报告：`report.md`",
+        "- 完整 OCR 与原始命中报告：`report.md`",
             "- 原始命中 CSV：`hits.csv`",
             "- 原始 OCR JSONL：`ocr.jsonl`",
             "- 逐秒截图目录：`frames/`",
@@ -373,18 +381,22 @@ def write_report(video: Path, results: list[dict], rows: list[dict], report_path
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="逐秒截图并检测视频画面文字中的违禁词/敏感词")
+    parser = argparse.ArgumentParser(description="抽帧并检测视频画面文字中的违禁词/敏感词")
     parser.add_argument("video", type=Path, help="视频文件路径")
     parser.add_argument("-o", "--output-dir", type=Path, default=None, help="输出目录，默认在当前目录创建")
     parser.add_argument("--tessdata-dir", type=Path, default=DEFAULT_TESSDATA_DIR, help="Tesseract 语言包目录")
     parser.add_argument("--no-download-tessdata", action="store_true", help="缺少中文 OCR 包时不自动下载")
     parser.add_argument("--psm", type=int, default=11, help="Tesseract 页面分割模式，默认 11")
+    parser.add_argument("--sample-every", type=float, default=1.0, help="每隔多少秒抽一张图，默认 1 秒")
     parser.add_argument("--update", action="store_true", help="检测前强制更新敏感词库")
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
+    if args.sample_every <= 0:
+        print("--sample-every 必须大于 0", file=sys.stderr)
+        return 1
     video = args.video.expanduser().resolve()
     if not video.exists():
         print(f"视频不存在: {video}", file=sys.stderr)
@@ -401,16 +413,15 @@ def main() -> int:
 
     words = load_words()
     if not words:
-        print("词库为空，请先运行 scripts/check.py --update", file=sys.stderr)
-        return 1
+        print("本地词库为空，仅使用内置风险词。可运行 scripts/check.py --update 拉取开源词库。", file=sys.stderr)
 
     output_dir = (args.output_dir or default_output_dir(video)).expanduser().resolve()
     frames_dir = output_dir / "frames"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"输出目录: {output_dir}")
-    frame_count = extract_second_frames(video, frames_dir)
-    print(f"已抽取逐秒截图: {frame_count} 张")
+    frame_count = extract_second_frames(video, frames_dir, args.sample_every)
+    print(f"已抽取截图: {frame_count} 张")
 
     tessdata_dir, language = prepare_tessdata(args.tessdata_dir, allow_download=not args.no_download_tessdata)
     print(f"OCR 语言: {language}")
