@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+
+# Runtime caches generated locally
+data/.update_state.json
+data/sensitive_words.txt
+data/tessdata/
+
+# Video scan outputs
+frames/
+ocr.jsonl
+hits.csv
+report.md
+review_summary.md
+*_sensitive_check/

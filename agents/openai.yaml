@@ -1,0 +1,3 @@
+display_name: 抖音违禁词检测
+short_description: 本地检测短视频文案和视频 OCR 画面文字中的敏感词。
+default_prompt: 检测这段短视频文案有没有违禁词或限流词，并给出修改建议。
